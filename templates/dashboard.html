@@ -1,0 +1,233 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>OpenWrench ↔ Zendesk Sync Dashboard</title>
+<style>
+  :root {
+    --bg: #0f1420; --panel: #161d2e; --border: #263049; --text: #e6ebf5;
+    --muted: #8a93a8; --accent: #4f8cff; --green: #35c76b; --red: #ff5c5c;
+    --amber: #f5b942;
+  }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0; padding: 32px; background: var(--bg); color: var(--text);
+    font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+  }
+  h1 { font-size: 22px; margin: 0 0 4px; }
+  .sub { color: var(--muted); font-size: 13px; margin-bottom: 28px; }
+  .grid { display: grid; grid-template-columns: 1fr 1fr; gap: 20px; margin-bottom: 20px; }
+  @media (max-width: 900px) { .grid { grid-template-columns: 1fr; } }
+  .panel {
+    background: var(--panel); border: 1px solid var(--border); border-radius: 12px;
+    padding: 20px;
+  }
+  .panel h2 { font-size: 15px; margin: 0 0 14px; display: flex; align-items: center; justify-content: space-between; }
+  .btn {
+    background: var(--accent); color: white; border: none; border-radius: 8px;
+    padding: 9px 16px; font-size: 13px; font-weight: 600; cursor: pointer;
+  }
+  .btn:hover { opacity: 0.9; }
+  .btn:disabled { opacity: 0.5; cursor: not-allowed; }
+  table { width: 100%; border-collapse: collapse; font-size: 13px; }
+  th, td { text-align: left; padding: 8px 6px; border-bottom: 1px solid var(--border); }
+  th { color: var(--muted); font-weight: 500; font-size: 12px; text-transform: uppercase; letter-spacing: 0.03em; }
+  tr:last-child td { border-bottom: none; }
+  .badge {
+    display: inline-block; padding: 2px 9px; border-radius: 999px; font-size: 11px; font-weight: 600;
+  }
+  .badge.success { background: rgba(53,199,107,0.15); color: var(--green); }
+  .badge.failed { background: rgba(255,92,92,0.15); color: var(--red); }
+  .badge.running, .badge.processing, .badge.received { background: rgba(245,185,66,0.15); color: var(--amber); }
+  .badge.skipped { background: rgba(138,147,168,0.15); color: var(--muted); }
+  .empty { color: var(--muted); font-size: 13px; padding: 12px 0; }
+  #toast {
+    position: fixed; top: 20px; right: 20px; background: var(--panel); border: 1px solid var(--border);
+    padding: 12px 18px; border-radius: 8px; font-size: 13px; display: none;
+  }
+  .stat-row { display: flex; gap: 18px; margin-bottom: 4px; }
+  .stat { font-size: 12px; color: var(--muted); }
+  .stat b { color: var(--text); }
+</style>
+</head>
+<body>
+
+<h1>OpenWrench ↔ Zendesk Sync</h1>
+<div class="sub">Background work-order sync runs every {{ sync_interval_hours }} hour(s). Live view refreshes automatically.</div>
+
+<div class="grid">
+
+  <div class="panel">
+    <h2>
+      Work Order Sync
+      <div style="display:flex;gap:8px;">
+        <button class="btn" id="run-btn" onclick="runSyncNow()">Run Sync Now</button>
+        <button class="btn" id="notes-btn" onclick="runNotesSyncNow()" style="background:#35c76b;">Sync OW Notes Now</button>
+      </div>
+    </h2>
+    <table id="runs-table">
+      <thead>
+        <tr><th>#</th><th>Trigger</th><th>Status</th><th>Started</th><th>Found</th><th>Created</th><th>Skipped</th></tr>
+      </thead>
+      <tbody>
+        {% for run in recent_runs %}
+        <tr>
+          <td>{{ run.id }}</td>
+          <td>{{ run.trigger_type }}</td>
+          <td><span class="badge {{ run.status }}">{{ run.status }}</span></td>
+          <td>{{ run.started_at.strftime('%Y-%m-%d %H:%M:%S') if run.started_at else '—' }} UTC</td>
+          <td>{{ run.records_found if run.records_found is not none else '—' }}</td>
+          <td>{{ run.records_created if run.records_created is not none else '—' }}</td>
+          <td>{{ run.records_skipped if run.records_skipped is not none else '—' }}</td>
+        </tr>
+        {% else %}
+        <tr><td colspan="7" class="empty">No sync runs yet.</td></tr>
+        {% endfor %}
+      </tbody>
+    </table>
+  </div>
+
+  <div class="panel">
+    <h2>Recent Zendesk Webhook Events</h2>
+    <table id="events-table">
+      <thead>
+        <tr><th>#</th><th>Type</th><th>Ticket</th><th>WO ID</th><th>Status</th><th>Received</th></tr>
+      </thead>
+      <tbody>
+        {% for e in recent_events %}
+        <tr>
+          <td>{{ e.id }}</td>
+          <td>{{ e.event_type.replace('zen:event-type:ticket.', '') if e.event_type else '—' }}</td>
+          <td>{{ e.zendesk_ticket_id or '—' }}</td>
+          <td>{{ e.openwrench_workorder_id or '—' }}</td>
+          <td><span class="badge {{ e.status }}">{{ e.status }}</span></td>
+          <td>{{ e.received_at.strftime('%Y-%m-%d %H:%M:%S') if e.received_at else '—' }} UTC</td>
+        </tr>
+        {% else %}
+        <tr><td colspan="6" class="empty">No webhook events yet.</td></tr>
+        {% endfor %}
+      </tbody>
+    </table>
+  </div>
+
+</div>
+
+<div class="panel">
+  <h2>Recently Synced Work Orders</h2>
+  <table>
+    <thead>
+      <tr><th>OW Work Order</th><th>Zendesk Ticket</th><th>Status (OW)</th><th>Status (ZD)</th><th>Created</th></tr>
+    </thead>
+    <tbody>
+      {% for wo in recent_work_orders %}
+      <tr>
+        <td>{{ wo.openwrench_workorder_id }}</td>
+        <td>
+          {% if wo.zendesk_ticket_url %}
+            <a href="{{ wo.zendesk_ticket_url }}" target="_blank" style="color: var(--accent);">#{{ wo.zendesk_ticket_id }}</a>
+          {% else %}
+            #{{ wo.zendesk_ticket_id }}
+          {% endif %}
+        </td>
+        <td>{{ wo.status_openwrench or '—' }}</td>
+        <td>{{ wo.status_zendesk or '—' }}</td>
+        <td>{{ wo.created_at.strftime('%Y-%m-%d %H:%M:%S') if wo.created_at else '—' }} UTC</td>
+      </tr>
+      {% else %}
+      <tr><td colspan="5" class="empty">No synced work orders yet.</td></tr>
+      {% endfor %}
+    </tbody>
+  </table>
+</div>
+
+<div id="toast"></div>
+
+<script>
+function showToast(msg, ok) {
+  const t = document.getElementById('toast');
+  t.textContent = msg;
+  t.style.borderColor = ok ? '#35c76b' : '#ff5c5c';
+  t.style.display = 'block';
+  setTimeout(() => t.style.display = 'none', 4000);
+}
+
+async function runNotesSyncNow() {
+  const btn = document.getElementById('notes-btn');
+  btn.disabled = true;
+  btn.textContent = 'Syncing…';
+  try {
+    const resp = await fetch('/sync/notes', { method: 'POST' });
+    const data = await resp.json();
+    if (resp.ok) {
+      showToast(`Notes sync done — ${data.message}`, true);
+    } else {
+      showToast(`Notes sync failed: ${data.detail || 'unknown error'}`, false);
+    }
+  } catch (err) {
+    showToast(`Notes sync failed: ${err}`, false);
+  }
+  btn.disabled = false;
+  btn.textContent = 'Sync OW Notes Now';
+  refreshStatus();
+}
+
+async function runSyncNow() {
+  const btn = document.getElementById('run-btn');
+  btn.disabled = true;
+  btn.textContent = 'Running…';
+  try {
+    const resp = await fetch('/sync/run', { method: 'POST' });
+    const data = await resp.json();
+    if (resp.ok) {
+      showToast(`Sync #${data.run_id} done — found ${data.found}, created ${data.created}, skipped ${data.skipped}`, true);
+    } else {
+      showToast(`Sync failed: ${data.detail || 'unknown error'}`, false);
+    }
+  } catch (err) {
+    showToast(`Sync failed: ${err}`, false);
+  }
+  btn.disabled = false;
+  btn.textContent = 'Run Sync Now';
+  refreshStatus();
+}
+
+function badgeClass(status) { return status || ''; }
+
+async function refreshStatus() {
+  try {
+    const resp = await fetch('/api/status');
+    const data = await resp.json();
+
+    const runsBody = document.querySelector('#runs-table tbody');
+    runsBody.innerHTML = data.runs.length ? data.runs.map(r => `
+      <tr>
+        <td>${r.id}</td>
+        <td>${r.trigger_type || '—'}</td>
+        <td><span class="badge ${badgeClass(r.status)}">${r.status}</span></td>
+        <td>${r.started_at ? r.started_at.replace('T',' ').slice(0,19) : '—'} UTC</td>
+        <td>${r.records_found ?? '—'}</td>
+        <td>${r.records_created ?? '—'}</td>
+        <td>${r.records_skipped ?? '—'}</td>
+      </tr>`).join('') : '<tr><td colspan="7" class="empty">No sync runs yet.</td></tr>';
+
+    const eventsBody = document.querySelector('#events-table tbody');
+    eventsBody.innerHTML = data.events.length ? data.events.map(e => `
+      <tr>
+        <td>${e.id}</td>
+        <td>${(e.event_type || '').replace('zen:event-type:ticket.', '')}</td>
+        <td>${e.zendesk_ticket_id ?? '—'}</td>
+        <td>${e.openwrench_workorder_id ?? '—'}</td>
+        <td><span class="badge ${badgeClass(e.status)}">${e.status}</span></td>
+        <td>${e.received_at ? e.received_at.replace('T',' ').slice(0,19) : '—'} UTC</td>
+      </tr>`).join('') : '<tr><td colspan="6" class="empty">No webhook events yet.</td></tr>';
+  } catch (err) {
+    console.error('Status refresh failed', err);
+  }
+}
+
+setInterval(refreshStatus, 600000); // 10 minute
+</script>
+
+</body>
+</html>
